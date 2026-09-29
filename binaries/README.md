@@ -40,6 +40,15 @@ hardware.
 this `postgres` into a plain `-O3` install prefix, or the reverse, produces a server that starts and
 then behaves as neither arm. Keep the prefix intact.
 
+## `pg_config` misreports the flags — ignore it
+
+`pg_config --cflags` on this prefix prints `-fprofile-generate`. That string is stale metadata recorded
+in the installed `Makefile.global`, not what built the code: the arm was configured from a tree derived
+from the instrumented build, so the recorded string never got rewritten. The actual contents are
+verified clean — `nm` finds **zero** `gcov`/profiling symbols in any of the 1,748 files, and the prefix
+is byte-for-byte the `pgoltoq` (`-fprofile-use` + LTO + `-g -Wl,-q`) install with exactly one file
+replaced: `bin/postgres`, the `llvm-bolt` output. Trust `nm`, not `pg_config`, on this tree.
+
 ## Provenance
 
 Built and benchmarked on the r8i.metal-48xl described in the root
