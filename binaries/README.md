@@ -9,7 +9,7 @@ landing page; it was never rebuilt for publication.
 | archive | `pg18-pgoltob.tar.xz` |
 | archive size | 16,406,964 bytes |
 | archive md5 | `86ee207e574675db196187259e53ad38` |
-| unpacked size | 71 MB, 1,748 entries |
+| unpacked size | 71 MB, 1,655 files |
 | `bin/postgres` md5 | `d27408aa2c408e0c4c0757902ea52668` |
 | `bin/postgres` size | 17,886,432 bytes |
 | version string | `postgres (PostgreSQL) 18.3` |
@@ -38,16 +38,44 @@ hardware.
 
 `lib/*.so` and `share/` in this archive come from the same LTO compilation as `bin/postgres`. Dropping
 this `postgres` into a plain `-O3` install prefix, or the reverse, produces a server that starts and
-then behaves as neither arm. Keep the prefix intact.
+then behaves as neither arm. Keep the prefix intact — but see the section below before using the
+bundled client utilities for anything.
 
-## `pg_config` misreports the flags — ignore it
+## The server is clean; 35 of the bundled client tools are not — read this before benchmarking
 
-`pg_config --cflags` on this prefix prints `-fprofile-generate`. That string is stale metadata recorded
-in the installed `Makefile.global`, not what built the code: the arm was configured from a tree derived
-from the instrumented build, so the recorded string never got rewritten. The actual contents are
-verified clean — `nm` finds **zero** `gcov`/profiling symbols in any of the 1,748 files, and the prefix
-is byte-for-byte the `pgoltoq` (`-fprofile-use` + LTO + `-g -Wl,-q`) install with exactly one file
-replaced: `bin/postgres`, the `llvm-bolt` output. Trust `nm`, not `pg_config`, on this tree.
+The PGO arms in this campaign were built by reusing the instrumented `pgogen` source tree, and the
+client programs were never relinked from it. So this prefix is a mix, and it matters:
+
+| component | state |
+|---|---|
+| `bin/postgres` — the server, the only thing benchmarked | **clean.** 0 `gcov` symbols, 0 `.gcda` strings — identical status to the `-O3` baseline |
+| `lib/*.so`, `lib/postgresql/*.so` | clean |
+| `bin/initdb` | clean |
+| 35 other `bin/*` utilities | **instrumented** (`-fprofile-generate` leftovers), including `psql`, `pg_ctl`, `pg_dump`, `pg_restore`, `pg_upgrade`, `pg_config` and **`pgbench`** |
+
+**Do not measure anything with the bundled `pgbench` or `psql`.** They are profile-generating builds,
+several times slower than a normal client, and they append to `.gcda` counters on every exit. Take
+those from a plain build. `pg_ctl` is instrumented too, but it only starts and stops the server, so it
+costs nothing in a measured run — which is exactly why this went unnoticed at benchmark time.
+
+None of this touches the published numbers: the measured path is HammerDB's own PostgreSQL driver
+talking to `bin/postgres`, and that binary carries no instrumentation.
+
+Verify any of it yourself:
+
+```sh
+readelf -sW bin/postgres | grep -c gcov     # 0
+readelf -sW bin/pgbench  | grep -c gcov     # 1497
+```
+
+`pg_config --cflags` prints `-fprofile-generate` on this prefix for the same reason — stale metadata
+recorded in the installed `Makefile.global`, plus `pg_config` itself being one of the instrumented
+copies. It does not describe how `bin/postgres` was compiled.
+
+The archive is published **unaltered** rather than cleaned up, because its value is that it is the exact
+tree that produced the numbers. Substituting binaries into it would break that guarantee. Apart from
+`bin/postgres` — the `llvm-bolt` output — it is byte-for-byte the `pgoltoq` (`-fprofile-use` + LTO +
+`-g -Wl,-q`) install: 1,655 files, one differs.
 
 ## Provenance
 
