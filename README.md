@@ -10,6 +10,9 @@ chosen](#1-choosing-the-methodology--ten-arms-on-one-machine), the
 [five-machine result](#2-final-result--base-vs-pgoltob-on-five-machine-sizes) and the
 [summary](#3-summary) — with the per-machine breakdown in [RESULTS.md](RESULTS.md).
 
+The build itself is published in [binaries/](binaries/): `pg18-pgoltob.tar.xz`, `bin/postgres` md5
+`d27408aa2c408e0c4c0757902ea52668`, for Xeon 6975P-C on Amazon Linux 2023.
+
 ## Contents
 
 | file | what it is |
@@ -17,6 +20,7 @@ chosen](#1-choosing-the-methodology--ten-arms-on-one-machine), the
 | [BUILD-OPTIONS.md](BUILD-OPTIONS.md) | the same pipeline as below, plus the failure modes behind each flag and the gates that catch a silently-wrong build |
 | [RESULTS.md](RESULTS.md) | NOPM for both arms at every virtual-user count on every box, plus what the data does and does not support |
 | [scripts/](scripts/) | the scripts that produced it |
+| [binaries/](binaries/) | the shipped `pgoltob` build itself, as an install prefix — the same tree that produced the numbers below |
 
 ---
 
