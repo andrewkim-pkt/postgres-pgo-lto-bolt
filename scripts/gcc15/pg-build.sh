@@ -1,5 +1,10 @@
 #!/bin/bash
-# Build one PostgreSQL 18.3 arm. Runs ON the metal box (<DUT_PRIVATE_IP>, AL2023, gcc14 14.2.1).
+# Build one PostgreSQL 18.3 arm with gcc 15.2.0 (/opt/gcc15). Runs ON the metal box (AL2023).
+#
+# gcc 15.2.0 VARIANT of ../pg-build.sh. It differs only in: the compiler and its gcc-ar/ranlib/nm,
+# the source tag (REL_18_3), the /opt/g15-pg18-* prefixes and ~/g15 work trees, and AutoFDO + LTO
+# (afdolto/afdoltoq) passing -fauto-profile on the COMPILE line as well as the link line, with a
+# build-log gate that requires it. Everything else is the published recipe, unchanged.
 #
 # Extends al-metal-hwpgo-c/pg-build.sh to the full 10-build lattice. Its conventions are kept
 # deliberately -- in-tree (non-VPATH) builds, PGO arms reusing the pgogen tree, a `base` arm
@@ -9,23 +14,23 @@
 # BOLT-input twins those need.
 #
 # SERVER BUILDS (10). Every one is -O3 -march=native -mtune=native plus the row's flags:
-#   base       (nothing)                                    -> /opt/pg18-base       arm A
-#   prep       -g / -Wl,-q                                  -> /opt/pg18-prep       BOLT input for B,
+#   base       (nothing)                                    -> /opt/g15-pg18-base       arm A
+#   prep       -g / -Wl,-q                                  -> /opt/g15-pg18-prep       BOLT input for B,
 #                                                                                   AutoFDO profile source,
 #                                                                                   NEVER benchmarked
 #   pgogen     -fprofile-generate -fprofile-update=prefer-atomic
-#                                                           -> /opt/pg18-pgogen     intermediate, NEVER benchmarked
-#   pgouse     -fprofile-use -fprofile-correction            -> /opt/pg18-pgo        arm P
-#   pgouseq    as pgouse + -g / -Wl,-q                       -> /opt/pg18-pgoq       BOLT input for PB, NEVER benchmarked
-#   pgolto     as pgouse + -flto=96 -ffat-lto-objects        -> /opt/pg18-pgolto     arm L
-#   pgoltoq    as pgolto + -g / -Wl,-q                       -> /opt/pg18-pgoltoq    BOLT input for LB, NEVER benchmarked
-#   afdo       -fauto-profile=<afdo>                         -> /opt/pg18-afdo       arm AF
+#                                                           -> /opt/g15-pg18-pgogen     intermediate, NEVER benchmarked
+#   pgouse     -fprofile-use -fprofile-correction            -> /opt/g15-pg18-pgo        arm P
+#   pgouseq    as pgouse + -g / -Wl,-q                       -> /opt/g15-pg18-pgoq       BOLT input for PB, NEVER benchmarked
+#   pgolto     as pgouse + -flto=96 -ffat-lto-objects        -> /opt/g15-pg18-pgolto     arm L
+#   pgoltoq    as pgolto + -g / -Wl,-q                       -> /opt/g15-pg18-pgoltoq    BOLT input for LB, NEVER benchmarked
+#   afdo       -fauto-profile=<afdo>                         -> /opt/g15-pg18-afdo       arm AF
 #   afdoq      as afdo + -g / -Wl,-q -fno-reorder-blocks-and-partition
-#                                                           -> /opt/pg18-afdoq      BOLT input for AFB, NEVER benchmarked
-#   afdolto    -flto=96 compile; -fauto-profile on the LINK line only (applies NO profile, see #2)
-#                                                           -> /opt/pg18-afdolto    arm AFL
+#                                                           -> /opt/g15-pg18-afdoq      BOLT input for AFB, NEVER benchmarked
+#   afdolto    -flto=96 -fauto-profile=<afdo> on the compile AND link line (see #2)
+#                                                           -> /opt/g15-pg18-afdolto    arm AFL
 #   afdoltoq   as afdolto + -g / -Wl,-q -fno-reorder-blocks-and-partition
-#                                                           -> /opt/pg18-afdoltoq   BOLT input for AFLB, NEVER benchmarked
+#                                                           -> /opt/g15-pg18-afdoltoq   BOLT input for AFLB, NEVER benchmarked
 #
 # CLIENT BUILDS (5), by llvm-bolt in pg-bolt.sh -- AL2023 ships no BOLT, so the binaries and
 # perf.data are shuttled to the client:
@@ -45,14 +50,12 @@
 #  1. afdoltoq disables hot/cold splitting; pgoltoq does NOT. BOLT handles pre-split functions
 #     badly and -fauto-profile turns splitting on, but the PGO side keeps it on because that is
 #     what the prior campaign measured and staying comparable to it is the point.
-#  2. afdolto/afdoltoq pass the profile on the LINK line only, to dodge a reported gcc 14.2.1
-#     -flto + -fauto-profile ICE. That applies NO profile: GCC's AutoFDO pass runs per TU at
-#     compile time, before LTO streaming, so at link time there is nothing left to annotate and
-#     gcc says nothing. Measured: afdoltoq relinked with and without the flag has byte-identical
-#     .text. Treat afdolto as plain LTO and afdoltob as LTO + BOLT.
-#     Retested 2026-09-30: on PG 18.3 neither gcc 14.2.1 nor gcc 15.2.0 ICEs with the profile on
-#     the compile line (the ICE was seen on a C++ code base), so the workaround was never needed
-#     here. scripts/gcc15/pg-build.sh puts the profile on both lines.
+#  2. afdolto/afdoltoq pass the profile on the COMPILE and the link line. The published gcc 14.2.1
+#     script put it on the link line only, to dodge a reported -flto + -fauto-profile ICE, and
+#     that applies no profile (AutoFDO runs per TU before LTO streaming). Retested 2026-09-30 on
+#     PG 18.3: gcc 15.2.0 (and 14.2.1) build it with zero ICEs, and .text differs from a plain
+#     LTO control, so the profile is applied. The gate below requires -fauto-profile in the
+#     compile commands; an ICE would fail the build and be listed by the make-failed grep.
 #  3. base carries no -g and no -Wl,-q: it is the binary a normal user would build. The BOLT
 #     and AutoFDO inputs live in `prep` instead of being folded into the baseline.
 #
@@ -75,13 +78,13 @@
 set -uo pipefail
 ARM=${1:?base|prep|pgogen|pgouse|pgouseq|pgolto|pgoltoq|afdo|afdoq|afdolto|afdoltoq}
 SRCREPO=${SRCREPO:-/home/ec2-user/postgres}
-GITREV=${GITREV:-p183-base}
-AFDO=${AFDO:-/home/ec2-user/hwpgo-pg/pg18.afdo}
-CC=/usr/bin/gcc14-gcc
+GITREV=${GITREV:-REL_18_3}
+AFDO=${AFDO:-/home/ec2-user/g15/prof/pg18-g15-hammerdb.afdo}
+CC=/opt/gcc15/bin/gcc
 COMMON="-O3 -march=native -mtune=native"
 LTOJOBS=${LTOJOBS:-96}
 JOBS=${JOBS:-192}
-PGOTREE=/home/ec2-user/pgsrc-pgo
+PGOTREE=/home/ec2-user/g15/pgsrc-pgo
 REUSE=0
 MAKEVARS=""
 
@@ -92,17 +95,17 @@ MAKEVARS=""
 LTO="-flto=$LTOJOBS -ffat-lto-objects"
 
 case "$ARM" in
-  base)   SRC=/home/ec2-user/pgsrc-base;  PREFIX=/opt/pg18-base
+  base)   SRC=/home/ec2-user/g15/pgsrc-base;  PREFIX=/opt/g15-pg18-base
           CFLAGS="$COMMON"; LDFLAGS="" ;;
-  prep)   SRC=/home/ec2-user/pgsrc-prep;  PREFIX=/opt/pg18-prep
+  prep)   SRC=/home/ec2-user/g15/pgsrc-prep;  PREFIX=/opt/g15-pg18-prep
           # -g for create_gcov (it needs .debug_line to map LBR samples back to source lines)
           # and -Wl,-q for llvm-bolt (it needs the retained relocations). Neither changes
           # codegen, which is what makes this a legitimate stand-in for `base`.
           CFLAGS="$COMMON -g"; LDFLAGS="-Wl,-q" ;;
-  afdo)   SRC=/home/ec2-user/pgsrc-afdo;  PREFIX=/opt/pg18-afdo
+  afdo)   SRC=/home/ec2-user/g15/pgsrc-afdo;  PREFIX=/opt/g15-pg18-afdo
           CFLAGS="$COMMON -fauto-profile=$AFDO"; LDFLAGS=""
           [ -s "$AFDO" ] || { echo "!!! no profile at $AFDO"; exit 1; } ;;
-  afdoq)  SRC=/home/ec2-user/pgsrc-afdoq; PREFIX=/opt/pg18-afdoq
+  afdoq)  SRC=/home/ec2-user/g15/pgsrc-afdoq; PREFIX=/opt/g15-pg18-afdoq
           # BOLT input for arm AFB (AutoFDO + BOLT, no LTO). Unlike afdolto/afdoltoq the
           # profile goes on the COMPILE line, so -fauto-profile reaches every compile command.
           # That makes AFB the only arm on the AutoFDO side where the profile shaped codegen --
@@ -116,24 +119,22 @@ case "$ARM" in
           CFLAGS="$COMMON -fauto-profile=$AFDO -g -fno-reorder-blocks-and-partition"
           LDFLAGS="-Wl,-q" ;;
   afdolto|afdoltoq)
-          # The profile goes on the LINK line only, to avoid a reported gcc 14.2.1 ICE (einline /
-          # pp_format) with -flto and -fauto-profile on one compile line. This is a NO-OP: AutoFDO
-          # runs per TU before LTO streaming, so these arms build plain LTO (asymmetry #2). Kept
-          # as-is because it is how the published binaries were built; see scripts/gcc15/.
+          # Profile on the COMPILE line (where AutoFDO actually runs, per TU) and on the link line.
+          # No ICE on PG 18.3 with gcc 15.2.0 -- see asymmetry #2.
           [ -s "$AFDO" ] || { echo "!!! no profile at $AFDO"; exit 1; }
           if [ "$ARM" = afdolto ]; then
-            SRC=/home/ec2-user/pgsrc-afdolto;  PREFIX=/opt/pg18-afdolto
-            CFLAGS="$COMMON $LTO"; LDFLAGS="$LTO -fauto-profile=$AFDO"
+            SRC=/home/ec2-user/g15/pgsrc-afdolto;  PREFIX=/opt/g15-pg18-afdolto
+            CFLAGS="$COMMON $LTO -fauto-profile=$AFDO"; LDFLAGS="$LTO -fauto-profile=$AFDO"
           else
-            SRC=/home/ec2-user/pgsrc-afdoltoq; PREFIX=/opt/pg18-afdoltoq
+            SRC=/home/ec2-user/g15/pgsrc-afdoltoq; PREFIX=/opt/g15-pg18-afdoltoq
             # BOLT "doesn't like it when the functions are already split" (Andi Kleen) and
             # -fauto-profile turns hot/cold splitting ON, so the BOLT-input twin turns it off.
             # That is a real codegen difference from arm AFL, which is exactly why this is its
             # own build and is never benchmarked itself.
-            CFLAGS="$COMMON $LTO -g -fno-reorder-blocks-and-partition"
+            CFLAGS="$COMMON $LTO -g -fno-reorder-blocks-and-partition -fauto-profile=$AFDO"
             LDFLAGS="$LTO -Wl,-q -fauto-profile=$AFDO -fno-reorder-blocks-and-partition"
           fi ;;
-  pgogen) SRC=$PGOTREE; PREFIX=/opt/pg18-pgogen
+  pgogen) SRC=$PGOTREE; PREFIX=/opt/g15-pg18-pgogen
           # prefer-atomic keeps the counters sane when several hundred backends touch the same
           # .gcda -- PG forks one backend per connection and the training run has hundreds.
           CFLAGS="$COMMON -fprofile-generate -fprofile-update=prefer-atomic"
@@ -160,14 +161,14 @@ case "$ARM" in
           P="-fprofile-use -fprofile-correction -fprofile-partial-training -Wno-missing-profile"
           MAKEVARS="enable_coverage=yes"   # same libpq assertion skip; also required at install
           case "$ARM" in
-            pgouse)  PREFIX=/opt/pg18-pgo;      CFLAGS="$COMMON $P";           LDFLAGS="" ;;
+            pgouse)  PREFIX=/opt/g15-pg18-pgo;      CFLAGS="$COMMON $P";           LDFLAGS="" ;;
             # BOLT input for arm PB: same codegen as pgouse plus what BOLT needs to read the
             # binary -- -g for the debug line table and -Wl,-q to keep relocations after linking.
             # No -fno-reorder-blocks-and-partition here: see asymmetry #1, the PGO side keeps
             # hot/cold splitting on so PB stays comparable to LB and to the prior campaign.
-            pgouseq) PREFIX=/opt/pg18-pgoq;     CFLAGS="$COMMON $P -g";        LDFLAGS="-Wl,-q" ;;
-            pgolto)  PREFIX=/opt/pg18-pgolto;   CFLAGS="$COMMON $P $LTO";      LDFLAGS="$LTO" ;;
-            pgoltoq) PREFIX=/opt/pg18-pgoltoq;  CFLAGS="$COMMON $P $LTO -g";   LDFLAGS="$LTO -Wl,-q" ;;
+            pgouseq) PREFIX=/opt/g15-pg18-pgoq;     CFLAGS="$COMMON $P -g";        LDFLAGS="-Wl,-q" ;;
+            pgolto)  PREFIX=/opt/g15-pg18-pgolto;   CFLAGS="$COMMON $P $LTO";      LDFLAGS="$LTO" ;;
+            pgoltoq) PREFIX=/opt/g15-pg18-pgoltoq;  CFLAGS="$COMMON $P $LTO -g";   LDFLAGS="$LTO -Wl,-q" ;;
           esac ;;
   *) echo "!!! unknown arm $ARM"; exit 1 ;;
 esac
@@ -178,7 +179,7 @@ esac
 # the environment.
 case "$ARM" in
   pgolto|pgoltoq|afdolto|afdoltoq)
-    export AR=/usr/bin/gcc14-gcc-ar RANLIB=/usr/bin/gcc14-gcc-ranlib NM=/usr/bin/gcc14-gcc-nm ;;
+    export AR=/opt/gcc15/bin/gcc-ar RANLIB=/opt/gcc15/bin/gcc-ranlib NM=/opt/gcc15/bin/gcc-nm ;;
 esac
 
 if [ -n "${TAG:-}" ]; then
@@ -212,7 +213,7 @@ if [ "$REUSE" = 1 ]; then
   # LINKED PROGRAMS MUST GO TOO, and deleting src/backend/postgres alone is not enough. Measured on
   # the pgouse pass of 2026-09-17: make re-entered src/bin/psql and recompiled psqlscan.o with
   # -fprofile-use, but never relinked psql -- build.out has no `-o psql` line -- so the pgogen-era
-  # INSTRUMENTED psql survived from 18:45 and `make install` copied it into /opt/pg18-pgo. 36 of the
+  # INSTRUMENTED psql survived from 18:45 and `make install` copied it into /opt/g15-pg18-pgo. 36 of the
   # tree's 39 executables were stale that way (psql 2875 gcov syms, pg_ctl 542, pg_dump 2650) while
   # bin/postgres itself was clean. That is not cosmetic: pg-srv.sh start/stop runs $PREFIX/bin/pg_ctl
   # and $PREFIX/bin/psql, an instrumented tool writes .gcda BESIDE ITS OBJECT in this tree, and this
@@ -316,7 +317,7 @@ else
   [ "$NG" -eq 0 ] && echo "    no-instrumentation : OK" || echo "    no-instrumentation : FAIL ($NG gcov syms)"
 fi
 
-# THE WHOLE PREFIX, not just the postmaster. /opt/pg18-pgo passed the gate above with a clean
+# THE WHOLE PREFIX, not just the postmaster. /opt/g15-pg18-pgo passed the gate above with a clean
 # bin/postgres while shipping an instrumented psql, pg_ctl and pg_dump beside it (see the reuse-clean
 # comment). The postmaster is what gets benchmarked, so the arm's numbers were fine -- but the tools
 # are what pg-srv.sh runs, and theirs is the path that writes .gcda back into the training tree.
@@ -348,9 +349,10 @@ case "$ARM" in
   afdoq)            need '-fauto-profile'; need ' -g '
                     need '-fno-reorder-blocks-and-partition' ;;
   afdolto|afdoltoq) need '-flto'
-                    echo "    flag -fauto-profile: absent by design (link-line only -- applies no profile)"
-                    echo -n "    link line carried the profile: "
-                    grep -c -- "-fauto-profile=$AFDO" build.out || true ;;
+                    # counted on compile commands (" -c "), not just the link line
+                    n=$(grep -- ' -c ' build.out | grep -c -- "-fauto-profile=$AFDO" || true)
+                    [ "$n" -gt 0 ] && echo "    flag -fauto-profile on compile lines: OK ($n lines)" \
+                                   || echo "    flag -fauto-profile on compile lines: FAIL (absent)" ;;
 esac
 
 # Functional smoke. -flto on PostgreSQL is the real risk: the backend exports symbols that
@@ -360,8 +362,8 @@ esac
 # GCOV_PREFIX sends the instrumented smoke run's counters somewhere disposable -- without it,
 # initdb + a trivial SELECT would write .gcda into the pgogen tree and contaminate the training
 # profile with bootstrap/DDL paths before HammerDB has run a single transaction.
-SMOKE=/home/ec2-user/smoke-$ARM
-SMOKE_GCOV=/home/ec2-user/gcda-smoke-$ARM
+SMOKE=/home/ec2-user/g15/smoke-$ARM
+SMOKE_GCOV=/home/ec2-user/g15/gcda-smoke-$ARM
 rm -rf "$SMOKE" "$SMOKE_GCOV"; mkdir -p "$SMOKE_GCOV"
 export GCOV_PREFIX="$SMOKE_GCOV" GCOV_PREFIX_STRIP=0
 if "$PREFIX/bin/initdb" -D "$SMOKE" -U postgres --no-sync > smoke.out 2>&1; then

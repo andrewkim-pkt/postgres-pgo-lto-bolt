@@ -209,7 +209,15 @@ handles pre-split functions badly. **The PGO input twin does not disable splitti
 so the arm stays comparable with an earlier campaign that measured it that way. If you are starting
 fresh rather than matching prior numbers, disabling it on the PGO side too is worth testing.
 
-One AutoFDO-specific trap, recorded here because it shapes what is comparable: GCC 14.2.1 ICEs
-(`einline` / `pp_format`) when `-flto` and `-fauto-profile` are both on the compile line. Putting
-the profile only on the *link* line avoids the ICE, but the flag then never reaches a compile
-command, so it cannot be audited from the build log the way the other arms can.
+One AutoFDO-specific trap, recorded here because it shapes what is comparable: the AutoFDO + LTO
+builds put `-fauto-profile` on the *link* line only, to avoid a reported GCC 14.2.1 internal compiler
+error (`einline` / `pp_format`) with `-flto` and `-fauto-profile` on one compile line. **On the link
+line alone the profile is ignored.** GCC's AutoFDO pass runs per translation unit at compile time,
+before LTO streaming, and GCC gives no warning. `afdoltoq` relinked with and without the flag has
+byte-identical `.text`. So `afdolto` is plain LTO and `afdoltob` is LTO + BOLT.
+
+Retested 2026-09-30 on PostgreSQL 18.3: neither GCC 14.2.1 nor GCC 15.2.0 hits the error with the
+profile on the compile line, and the profile then changes `.text` by 1.2-2.4% against a plain LTO
+control. The error was seen on a C++ code base, not on PostgreSQL. The gcc 15.2.0 build script,
+[`scripts/gcc15/pg-build.sh`](scripts/gcc15/pg-build.sh), puts the profile on both lines; see the
+gcc 15.2.0 section at the end of the [README](README.md).

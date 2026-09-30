@@ -357,6 +357,7 @@ These are the checks that caught real mistakes.
 | `pg-profile.sh` | load client | orchestrates a profiling run: start server, apply load, record inside the steady-state window |
 | `pg-record.sh` | database host | the `perf record` invocation, one mode for BOLT and one for AutoFDO |
 | `pg-bolt.sh` | BOLT host | `perf2bolt` + `llvm-bolt`, with the profile-quality gates |
+| `gcc15/pg-build.sh` | database host | gcc 15.2.0 variant of `pg-build.sh`: AutoFDO + LTO profile on the compile line too (see the gcc 15.2.0 section at the end) |
 
 The split across three hosts is not incidental. Amazon Linux 2023 ships no BOLT, so the sampled
 binary and its `perf.data` move to a host that has it, and only the rewritten `postgres` comes back.
@@ -548,6 +549,8 @@ so the profile is applied. The crash was observed on a C++ code base and does no
 different profile could still trigger it; the build log gate below would show it.
 
 ## Common to every build
+
+Every build below is produced by [`scripts/gcc15/pg-build.sh <arm>`](scripts/gcc15/pg-build.sh).
 
 | item | value |
 |---|---|
