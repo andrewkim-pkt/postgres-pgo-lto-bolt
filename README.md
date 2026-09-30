@@ -517,9 +517,11 @@ Three limits on how far this generalises:
 
 # gcc 15.2.0 build matrix: AutoFDO, AutoFDO + LTO, AutoFDO + LTO + BOLT, PGO, PGO + LTO, PGO + LTO + BOLT
 
-**Status (2026-09-30): in progress.** Toolchain and the three profile-free builds are done; the
-HammerDB training, profile recording, profile-guided builds and BOLT steps below are the plan and
-have not run yet. No performance numbers are claimed in this section.
+**Status (2026-09-30): in progress.** Done so far: the full toolchain (gcc 15.2.0, AutoFDO
+`create_gcov`, `llvm-bolt`/`perf2bolt` 18.1.3, and a HammerDB 4.7 client with the PostgreSQL driver
+verified), plus the three profile-free builds (`base`, `prep`, `pgogen`), each of which passes its
+gates and answers a smoke query. The HammerDB training, profile recording, profile-guided builds and
+BOLT steps below are the plan and have not run yet. No performance numbers are claimed in this section.
 
 This rebuilds the whole six-arm matrix with gcc 15.2.0 on one r8i.metal-48xl (Xeon 6975P-C, 192 vCPU,
 3 NUMA nodes), with a separate r8i.16xlarge HammerDB client in the same availability zone. The recipe
@@ -563,7 +565,9 @@ Every build below is produced by [`scripts/gcc15/pg-build.sh <arm>`](scripts/gcc
 | `LTO` | `-flto=96 -ffat-lto-objects` |
 | `PGOUSE` | `-fprofile-use -fprofile-correction -fprofile-partial-training -Wno-missing-profile` |
 | `AFDO` | `-fauto-profile=pg18-g15-hammerdb.afdo` |
-| profile tools | AutoFDO `create_gcov` / `dump_gcov` (upstream, GCOV build, shared protobuf); `perf2bolt` / `llvm-bolt` 18.1.3 |
+| AutoFDO tools | upstream `google/autofdo`, `cmake -DCMAKE_BUILD_TYPE=Release -DENABLE_TOOL=GCOV`, producing `create_gcov` / `dump_gcov`; `Protobuf_USE_STATIC_LIBS` switched to `FALSE` in `CMakeLists.txt`, because the distribution ships only a shared protobuf |
+| BOLT tools | `llvm-bolt` 18.1.3 from tag `llvmorg-18.1.3`: `cmake -G Ninja ../llvm -DLLVM_ENABLE_PROJECTS=bolt -DLLVM_TARGETS_TO_BUILD=X86 -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=OFF`, then `ninja bolt`; `llvm-bolt` and `merge-fdata` copied to `/opt/llvm-bolt-18.1.3/bin`, and `perf2bolt` is a symlink to `llvm-bolt` |
+| HammerDB client | HammerDB 4.7 with the PostgreSQL client library (`libpq`), in the same availability zone as the server |
 
 ## Step by step
 
