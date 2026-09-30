@@ -513,3 +513,136 @@ Three limits on how far this generalises:
   (64T) / +9.59% (48T) — the three smaller machines cluster and the largest is lowest — but the
   conservative row scrambles that ordering entirely (+5.57 / +7.12 / +6.53 / +8.31). The 48xl also
   differs in warehouse count and NUMA topology, so it is not a clean core-count comparison either.
+
+# gcc 15.2.0 build matrix: AutoFDO, AutoFDO + LTO, AutoFDO + LTO + BOLT, PGO, PGO + LTO, PGO + LTO + BOLT
+
+**Status (2026-09-30): in progress.** Toolchain and the three profile-free builds are done; the
+HammerDB training, profile recording, profile-guided builds and BOLT steps below are the plan and
+have not run yet. No performance numbers are claimed in this section.
+
+This rebuilds the whole six-arm matrix with gcc 15.2.0 on one r8i.metal-48xl (Xeon 6975P-C, 192 vCPU,
+3 NUMA nodes), with a separate r8i.16xlarge HammerDB client in the same availability zone. The recipe
+is the one documented above; the differences are listed at the end of the section.
+
+## Why: AutoFDO + LTO now applies the profile
+
+The earlier `afdolto` / `afdoltob` arms passed `-fauto-profile` on the link line only, to avoid a
+reported gcc 14.2.1 internal compiler error with `-flto` and `-fauto-profile` on one compile line.
+On the link line alone the profile is ignored: GCC's AutoFDO pass runs per translation unit, before
+LTO streaming. So those arms were effectively plain LTO and plain LTO + BOLT.
+
+Retested on PostgreSQL 18.3 (`REL_18_3`, 62d6c7d3df6) with the earlier sysbench-trained profile,
+the profile on **both** the compile and link lines, and `make -k` so every crashing file would be counted:
+
+| compiler | build | internal compiler errors | `.text` bytes | vs plain LTO |
+|---|---|---|---|---|
+| gcc 14.2.1 | plain LTO (control) | 0 | 8,325,106 | — |
+| gcc 14.2.1 | AutoFDO + LTO | 0 | 8,526,994 | +2.4% |
+| gcc 14.2.1 | AutoFDO + LTO, `-g -fno-reorder-blocks-and-partition` | 0 | 8,474,034 | +1.8% |
+| gcc 15.2.0 | plain LTO (control) | 0 | 8,935,970 | — |
+| gcc 15.2.0 | AutoFDO + LTO | 0 | 9,101,522 | +1.9% |
+| gcc 15.2.0 | AutoFDO + LTO, `-g -fno-reorder-blocks-and-partition` | 0 | 9,044,914 | +1.2% |
+
+Neither compiler crashed on PostgreSQL, and each AutoFDO + LTO build differs from its plain LTO control,
+so the profile is applied. The crash was observed on a C++ code base and does not reproduce here. A
+different profile could still trigger it; the build log gate below would show it.
+
+## Common to every build
+
+| item | value |
+|---|---|
+| source | stock PostgreSQL 18.3, tag `REL_18_3` (62d6c7d3df6), exported fresh per build with `git archive` |
+| compiler | gcc 15.2.0 built from the GNU release (`--enable-languages=c,c++ --disable-multilib --disable-bootstrap --enable-lto --with-system-zlib`), installed at `/opt/gcc15` |
+| LTO archivers | `AR/RANLIB/NM = /opt/gcc15/bin/gcc-{ar,ranlib,nm}` |
+| configure | `--prefix=/opt/g15-pg18-<arm> --with-openssl --with-readline` (ICU on, JIT off) |
+| make | `make -j192` |
+| `COMMON` | `-O3 -march=native -mtune=native` |
+| `LTO` | `-flto=96 -ffat-lto-objects` |
+| `PGOUSE` | `-fprofile-use -fprofile-correction -fprofile-partial-training -Wno-missing-profile` |
+| `AFDO` | `-fauto-profile=pg18-g15-hammerdb.afdo` |
+| profile tools | AutoFDO `create_gcov` / `dump_gcov` (upstream, GCOV build, shared protobuf); `perf2bolt` / `llvm-bolt` 18.1.3 |
+
+## Step by step
+
+**Step 1. Builds that need no profile** (done)
+
+| build | CFLAGS | LDFLAGS | role | md5 / `.text` bytes |
+|---|---|---|---|---|
+| `base` | `COMMON` | – | control arm | `f8459d95d7de` / 7,033,986 |
+| `prep` | `COMMON -g` | `-Wl,-q` | binary that is profiled for AutoFDO | `c5a1c649e46e` / 7,033,986 |
+| `pgogen` | `COMMON -fprofile-generate -fprofile-update=prefer-atomic` | `-fprofile-generate` (+ `make enable_coverage=yes`) | PGO training binary | `dd62742f97e9`, 59,300 gcov symbols |
+
+`prep` has the same `.text` size as `base`, confirming that `-g` and `-Wl,-q` do not change code generation.
+
+**Step 2. PGO training** on `pgogen`
+
+- Server pinned to NUMA node 1 (`32-63,128-159`, memory on node 1): a 64-vCPU training cell.
+- HammerDB 4.7 TPROC-C, 1536 warehouses, **64 VU** (the cell's core count), 3 min rampup + 10 min run,
+  `allwarehouse true`, `keyandthink false`, stored procedures on.
+- Before training, delete the `.gcda` files written by the build's own tools. Stop with `pg_ctl -m fast`;
+  an immediate stop skips the exit handlers and loses every counter.
+
+**Step 3. PGO builds**, reusing the trained tree in place
+
+| build | CFLAGS | LDFLAGS | role |
+|---|---|---|---|
+| `pgo` | `COMMON PGOUSE` | – | **arm: PGO** |
+| `pgolto` | `COMMON PGOUSE LTO` | `LTO` | **arm: PGO + LTO** |
+| `pgoltoq` | `COMMON PGOUSE LTO -g` | `LTO -Wl,-q` | BOLT input, not benchmarked |
+
+**Step 4. AutoFDO recording**, on `prep` under the step 2 load (6 min of load; recording starts 30 s after rampup)
+
+```
+echo 0 > /proc/sys/kernel/nmi_watchdog          # frees a PMU counter; restored afterwards
+perf record -e cycles:u -j any,u -c 400009 \
+    -C 32-63,128-159 -m 128M --proc-map-timeout 5000 -o perf-afdo.data -- sleep 180
+perf inject --build-ids -i perf-afdo.data -o perf-afdo.inj.data
+create_gcov --binary=postgres --profile=perf-afdo.inj.data \
+    --gcov=pg18-g15-hammerdb.afdo --gcov_version=2
+```
+
+gcc 15.2.0 reads version-2 AutoFDO profiles (verified by the retest above).
+
+**Step 5. AutoFDO builds**
+
+| build | CFLAGS | LDFLAGS | role |
+|---|---|---|---|
+| `afdo` | `COMMON AFDO` | – | **arm: AutoFDO** |
+| `afdolto` | `COMMON LTO AFDO` | `LTO AFDO` | **arm: AutoFDO + LTO** (profile now on the compile line too) |
+| `afdoltoq` | `COMMON LTO -g -fno-reorder-blocks-and-partition AFDO` | `LTO -Wl,-q AFDO -fno-reorder-blocks-and-partition` | BOLT input, not benchmarked |
+
+The build gate now requires `-fauto-profile` in the compile commands of `afdolto` and `afdoltoq`, not just
+on the link line.
+
+**Step 6. BOLT recording**, one per BOLT input and never shared (perf2bolt matches samples by address)
+
+```
+perf record -b -z1 --aio=4 -c 100003 -e branches:u \
+    -C 32-63,128-159 -m 128M --proc-map-timeout 5000 -o perf-bolt-<arm>.data -- sleep 180
+```
+
+Run once against `pgoltoq` and once against `afdoltoq`, each serving the step 2 load.
+
+**Step 7. BOLT rewrite** (llvm-bolt 18.1.3)
+
+```
+perf2bolt -p perf-bolt-<arm>.data -o <arm>.fdata ./postgres      # input file must be named "postgres"
+llvm-bolt ./postgres -o postgres.bolt -data=<arm>.fdata \
+    -reorder-blocks=ext-tsp -reorder-functions=cdsort -split-functions \
+    -split-all-cold -split-eh -dyno-stats --update-debug-sections
+```
+
+- `pgoltoq` becomes **arm: PGO + LTO + BOLT**, and `afdoltoq` becomes **arm: AutoFDO + LTO + BOLT**.
+- Each BOLTed binary goes into a copy of its input's install prefix, so the libraries come from the same compile.
+- Gates: `.fdata` > 500 KB, > 200 functions with profile data, `.note.bolt_info` present.
+
+## Differences from the gcc 14.2.1 recipe above
+
+1. gcc 15.2.0 instead of gcc 14.2.1.
+2. AutoFDO + LTO puts the profile on the compile line as well as the link line, which is what applies it.
+3. New HammerDB-trained profiles are recorded from these gcc 15 builds; PGO training and the AutoFDO
+   recording use the same load.
+
+One asymmetry is kept from the recipe above: `afdoltoq` disables hot/cold splitting
+(`-fno-reorder-blocks-and-partition`) but `pgoltoq` does not, so the results stay comparable with the
+earlier campaign.
