@@ -13,6 +13,10 @@ chosen](#1-choosing-the-methodology--ten-arms-on-one-machine), the
 The build itself is published in [binaries/](binaries/): `pg18-pgoltob.tar.xz`, `bin/postgres` md5
 `d27408aa2c408e0c4c0757902ea52668`, for Xeon 6975P-C on Amazon Linux 2023.
 
+**Also on sysbench:** the same binary, untouched, was measured on sysbench `oltp_read_write` across five r8i
+sizes. It is **+7 to +12% tps** where the server is CPU-bound, and cheaper per transaction almost everywhere. See
+[Sysbench benchmark of PostgreSQL 18.3 with the HammerDB-trained HWPGO build](#sysbench-benchmark-of-postgresql-183-with-the-hammerdb-trained-hwpgo-build-pgo--lto--bolt).
+
 ## Contents
 
 | file | what it is |
@@ -21,6 +25,140 @@ The build itself is published in [binaries/](binaries/): `pg18-pgoltob.tar.xz`, 
 | [RESULTS.md](RESULTS.md) | NOPM for both arms at every virtual-user count on every box, plus what the data does and does not support |
 | [scripts/](scripts/) | the scripts that produced it |
 | [binaries/](binaries/) | the shipped `pgoltob` build itself, as an install prefix — the same tree that produced the numbers below |
+| [sysbench-sweep-20260929/](sysbench-sweep-20260929/) | sysbench `oltp_read_write` sweep of this binary on five r8i sizes: raw per-run data, per-box configs, harness |
+
+---
+
+# Sysbench benchmark of PostgreSQL 18.3 with the HammerDB-trained HWPGO build (PGO + LTO + BOLT)
+
+**Question:** the published `pgoltob` binary was profile-trained on HammerDB TPROC-C. Does it also speed up a
+different OLTP workload, sysbench `oltp_read_write`, that it was never trained on?
+
+**Answer: yes, once the server is CPU-bound.** On single-NUMA-node boxes the unmodified published binary is
+**+7 to +12% tps** over a plain `-O3 -march=native` build at the saturated thread counts. On 31 of the 32
+box x thread cells it needs less CPU per transaction, typically **5-10% less**. Where the server is not CPU-bound, or
+is limited by lock contention (the 2- and 3-node boxes above ~1024 threads), that saving does not turn into
+throughput.
+
+Measured 2026-09-29 on five AWS r8i sizes (Xeon 6975P-C, us-east-2), 32 to 1024 threads (to 2048 on the
+48xlarge), mirrored A/B/B/A order, 0 errors in all 128 runs. Raw data, per-box configs and the harness are
+in [`sysbench-sweep-20260929/`](sysbench-sweep-20260929/).
+
+## Binaries under test
+
+| arm | what it is | `bin/postgres` md5 |
+|---|---|---|
+| `base` | stock PostgreSQL 18.3, `-O3 -march=native -mtune=native`, gcc 14.2.1 (`gcc14-gcc`), built on each box | `f1b62bb68d47...` |
+| `pgoltob` | the published PGO + LTO + BOLT build, trained on HammerDB TPROC-C, installed unmodified from [`binaries/pg18-pgoltob.tar.xz`](https://github.com/andrewkim-pkt/postgres-pgo-lto-bolt/tree/main/binaries) | `d27408aa2c40...` |
+
+`base` built independently on all five boxes came out byte-identical, so the baseline is the same binary everywhere.
+
+## Result: tps, pgoltob vs base
+
+Each cell is the mean of both passes. **Bold** = distinguishable: the delta is larger than the pass-A-to-pass-B
+spread of both arms. ° = not distinguishable from base.
+
+| threads | 4xlarge<br>16 vCPU, 1 node | 8xlarge<br>32 vCPU, 1 node | 16xlarge<br>64 vCPU, 1 node | 24xlarge<br>96 vCPU, 2 nodes | 48xlarge\*<br>96 vCPU, 3 nodes |
+|---|---|---|---|---|---|
+| 32 | **+4.27%** | +0.72% ° | -0.05% ° | -0.34% ° | +0.75% ° |
+| 64 | **+4.84%** | **+3.09%** | **+1.85%** | +3.14% ° | **+7.67%** |
+| 128 | **+8.92%** | **+3.59%** | **+3.20%** | **+3.62%** | **+7.10%** |
+| 256 | **+8.21%** | **+7.00%** | **+6.58%** | +4.38% ° | -0.27% ° |
+| 512 | **+11.81%** | **+7.69%** | **+7.31%** | **+3.23%** | **+4.80%** |
+| 1024 | **+8.62%** | **+10.70%** | **+6.96%** | **+4.72%** | **-1.64%** |
+| 1536 | - | - | - | - | **+14.03%** |
+| 2048 | - | - | - | - | **-2.22%** |
+| **mean, 32-1024** | **+7.78%** | **+5.47%** | **+4.31%** | **+3.13%** | **+3.07%** |
+| base peak | 13,895 tps @ 128 | 28,814 @ 256 | 53,550 @ 512 | 69,352 @ 512 | 65,155 @ 1024 |
+
+\* The 48xlarge ran with **96 vCPU, not 192**: it was launched from the 24xlarge with "Launch more like this",
+which copied the 24xlarge CPU options (48 cores x 2 threads). It is effectively a 24xlarge CPU with 1.5 TiB RAM
+and 3 NUMA nodes (SNC-3). A run at the full 192 vCPU is still to do.
+
+## Result: CPU per transaction, pgoltob vs base
+
+Server CPU-microseconds per transaction (server busy fraction x vCPU / tps). Negative = cheaper.
+
+| threads | 4xlarge | 8xlarge | 16xlarge | 24xlarge | 48xlarge\* |
+|---|---|---|---|---|---|
+| 32 | -10.0% | -5.9% | -6.9% | -5.1% | -9.1% |
+| 64 | -6.7% | -9.2% | -9.1% | -6.6% | -8.5% |
+| 128 | -9.1% | -6.2% | -7.7% | -3.5% | -8.3% |
+| 256 | -7.6% | -7.4% | -6.4% | -3.7% | -5.6% |
+| 512 | -10.6% | -7.2% | -8.0% | -5.4% | -8.1% |
+| 1024 | -7.9% | -9.7% | -6.8% | -5.0% | -0.2% |
+| 1536 | - | - | - | - | -13.5% |
+| 2048 | - | - | - | - | +1.5% |
+
+Base server busy % at each rung is in [`results/summary.tsv`](sysbench-sweep-20260929/results/summary.tsv).
+
+## Reading the result
+
+- **The binary is consistently cheaper per transaction**: cheaper on 31 of the 32 box x thread cells, typically
+  by 5-10%.
+- **On the single-node boxes that saving becomes throughput once the server is CPU-bound.** Below ~70% server
+  busy the gain there is 0-5%; at 97-100% busy it is +7 to +12%. The 48xlarge is the exception at low load:
+  +7% at 64-128 threads while only 26-30% busy.
+- **Multi-node boxes gain less.** The 24xlarge (2 nodes) and 48xlarge (3 nodes) stop at 88-92% busy, and the
+  pass-to-pass spread widens to as much as 5.5% (restart-to-restart memory placement varies across nodes). On
+  the 48xlarge above 1024 threads the run is lock-contention-bound, where the CPU-per-transaction saving itself
+  disappears (-0.2% at 1024, +1.5% at 2048). In that regime the order of the two arms is set by contention,
+  not code layout, so the curve zig-zags. Both passes reproduce each rung within ~2%, so the zig-zag is real.
+- **Consistent with earlier sysbench campaigns.** On a us-east-1 r8i.metal-48xl at 1200 connections and 78%
+  busy the same binary was a null result (-0.66%, inside noise). The sysbench-TRAINED lattice on a us-east-2
+  48xlarge at 60-68% busy put `pgoltob` at +4.11% with -12.8% CPU per transaction. Neither run saturated the server.
+
+## Test setup
+
+| | |
+|---|---|
+| servers | r8i.4xlarge / 8xlarge / 16xlarge / 24xlarge / 48xlarge, Xeon 6975P-C, 480 MiB L3 per socket, Amazon Linux 2023 |
+| client | one r8i.16xlarge, same AZ (us-east-2c), sysbench 1.1.0 (git master, pgsql driver), never on the server |
+| data dir | tmpfs, restored from an EBS golden copy before every arm-pass; `shared_buffers` on 1 GiB huge pages |
+| workload | `oltp_read_write`, 250 tables, uniform random, 20 statements per transaction (checked on every rung) |
+| per rung | 60 s warm-up + 120 s measured, 10 s report interval |
+| per arm-pass | restore golden, start, 180 s prewarm at 64 threads (discarded), then all rungs in one server lifetime |
+| order | pass A `base, pgoltob`, pass B `pgoltob, base`, so both arms have the same mean position in time |
+
+**Sizing: every absolute scales with the box, every ratio is held.** Row count scales, table count does not.
+Keeping 250 tables everywhere keeps the relation count, index count and lock-partition spread identical, so
+only the data volume changes, not the contention structure.
+
+| | 4xlarge | 8xlarge | 16xlarge | 24xlarge | 48xlarge |
+|---|---|---|---|---|---|
+| vCPU / RAM | 16 / 124 GiB | 32 / 248 GiB | 64 / 496 GiB | 96 / 743 GiB | 96\* / 1488 GiB |
+| rows per table (x250) | 250k | 500k | 1M | 1.5M | 3M |
+| golden data dir | 32 GB | 63 GB | 126 GB | 189 GB | 377 GB |
+| `shared_buffers` / 1 GiB huge pages | 32GB / 34 | 64GB / 68 | 128GB / 134 | 192GB / 201 | 384GB / 402 |
+| `max_wal_size` / `min_wal_size` | 16GB / 2GB | 32GB / 4GB | 64GB / 8GB | 96GB / 12GB | 192GB / 24GB |
+| `max_connections` | 1500 | 1500 | 1500 | 1500 | 2500 |
+
+Everything that shapes the workload is identical on all boxes: `synchronous_commit=off`, `full_page_writes=off`,
+`wal_level=minimal`, `wal_buffers=1GB`, `checkpoint_timeout=30min`, `jit=off`, planner costs, autovacuum,
+data checksums on (PG18 default). Full configs: [`config/`](sysbench-sweep-20260929/config/).
+
+**Metrics.** tps and qps add across sysbench processes. p95 does not, so the worst process is reported.
+Each process is averaged over its own measured intervals before summing. Server busy % comes from
+`/proc/stat` on the server, sampled at the start and end of the measured window only.
+
+**One sysbench process holds at most 512 threads.** At 250 tables each thread keeps per-table prepared-statement
+state in its own LuaJIT heap, and above ~512 threads a single process runs out of LuaJIT memory. 1024 threads
+run as 2 x 512, 1536 as 3 x 512, 2048 as 4 x 512.
+
+## Files
+
+```
+sysbench-sweep-20260929/
+  results/per-pass.tsv    every run: box, pass, arm, threads, procs, tps, server busy %, worst p95, CPU us/txn, errors
+  results/summary.tsv     both passes side by side, mean, delta, per-arm spread, distinguishable flag
+  config/<instance>/      pg-env.sh (sizing) and postgresql.conf for each box
+  scripts/server/         provision.sh (bare AL2023 -> ready DUT), pg-hp.sh, pg-ds.sh, pg-srv.sh, pg-prep-local.sh,
+                          keepalive.sh + ka-start.sh / ka-restart.sh (keep a waiting box above an idle-shutdown policy)
+  scripts/client/         sb-env*.sh (per box), sb-lib.sh, sb-ladder*.sh (one arm, all rungs), sb-mirror*.sh (A/B/B/A)
+```
+
+Private addresses are replaced by `<SERVER_PRIVATE_IP>` / `<CLIENT_PRIVATE_IP>` and the database password by
+`<SB_PASSWORD>`. Set them before running.
 
 ---
 
