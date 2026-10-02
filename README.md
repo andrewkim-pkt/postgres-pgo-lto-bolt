@@ -20,7 +20,9 @@ sizes. It is **+7 to +12% tps** where the server is CPU-bound, and cheaper per t
 **New, built with gcc 15.2.0 (2026-10-02):** the matrix was rebuilt with gcc 15.2.0 and measured on the
 whole machine at 32 to 1024 VU. `pgoltob` beats `base` by **+11.95% on the 48xl, +10.30% on the 24xl and
 +10.54% on the 16xl**, and is the best of the three optimised arms on all three machines. See
-[the gcc 15.2.0 result](#result-whole-box-hammerdb-tproc-c-gcc-1520-arms-vs-base).
+[the gcc 15.2.0 result](#result-whole-box-hammerdb-tproc-c-gcc-1520-arms-vs-base). The gcc 15.2.0 `pgoltob`
+build is published as [binaries/g15-pg18-pgoltob.tar.xz](binaries/), `bin/postgres` md5
+`2b4d8844dc0cb5d8c4e08df9c1f63610`.
 
 ## Contents
 
@@ -29,7 +31,7 @@ whole machine at 32 to 1024 VU. `pgoltob` beats `base` by **+11.95% on the 48xl,
 | [BUILD-OPTIONS.md](BUILD-OPTIONS.md) | the same pipeline as below, plus the failure modes behind each flag and the gates that catch a silently-wrong build |
 | [RESULTS.md](RESULTS.md) | NOPM for both arms at every virtual-user count on every box, plus what the data does and does not support |
 | [scripts/](scripts/) | the scripts that produced it |
-| [binaries/](binaries/) | the shipped `pgoltob` build itself, as an install prefix — the same tree that produced the numbers below |
+| [binaries/](binaries/) | the shipped `pgoltob` builds themselves (gcc 14.2.1 and gcc 15.2.0), as install prefixes — the same trees that produced the numbers below |
 | [sysbench-sweep-20260929/](sysbench-sweep-20260929/) | sysbench `oltp_read_write` sweep of this binary on five r8i sizes: raw per-run data, per-box configs, harness |
 
 ---
@@ -593,7 +595,8 @@ machines. Only the within-machine ratio is meaningful.
 
 **Binaries (`bin/postgres` md5, first 12 hex digits):** `base` f8459d95d7de, `afdoltob` 887bb3886808,
 `pgolto` 5639be5bce8f, `pgoltob` 2b4d8844dc0c. The same files ran on all three machines; they were
-copied, not rebuilt.
+copied, not rebuilt. The `pgoltob` tree is published as
+[`binaries/g15-pg18-pgoltob.tar.xz`](binaries/README.md#gcc-1520-build-g15-pg18-pgoltobtarxz).
 
 ## Build and test machines
 
