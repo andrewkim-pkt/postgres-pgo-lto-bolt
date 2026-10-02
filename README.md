@@ -17,6 +17,11 @@ The build itself is published in [binaries/](binaries/): `pg18-pgoltob.tar.xz`, 
 sizes. It is **+7 to +12% tps** where the server is CPU-bound, and cheaper per transaction almost everywhere. See
 [Sysbench benchmark of PostgreSQL 18.3 with the HammerDB-trained HWPGO build](#sysbench-benchmark-of-postgresql-183-with-the-hammerdb-trained-hwpgo-build-pgo--lto--bolt).
 
+**New, built with gcc 15.2.0 (2026-10-02):** the matrix was rebuilt with gcc 15.2.0 and measured on the
+whole machine at 32 to 1024 VU. `pgoltob` beats `base` by **+11.95% on the 48xl, +10.30% on the 24xl and
++10.54% on the 16xl**, and is the best of the three optimised arms on all three machines. See
+[the gcc 15.2.0 result](#result-whole-box-hammerdb-tproc-c-gcc-1520-arms-vs-base).
+
 ## Contents
 
 | file | what it is |
@@ -517,11 +522,80 @@ Three limits on how far this generalises:
 
 # gcc 15.2.0 build matrix: AutoFDO, AutoFDO + LTO, AutoFDO + LTO + BOLT, PGO, PGO + LTO, PGO + LTO + BOLT
 
-**Status (2026-09-30): in progress.** Done so far: the full toolchain (gcc 15.2.0, AutoFDO
-`create_gcov`, `llvm-bolt`/`perf2bolt` 18.1.3, and a HammerDB 4.7 client with the PostgreSQL driver
-verified), plus the three profile-free builds (`base`, `prep`, `pgogen`), each of which passes its
-gates and answers a smoke query. The HammerDB training, profile recording, profile-guided builds and
-BOLT steps below are the plan and have not run yet. No performance numbers are claimed in this section.
+**Status (2026-10-02): built and benchmarked.** The full matrix is built and profiled with the
+toolchain below: gcc 15.2.0, AutoFDO `create_gcov`, and `llvm-bolt`/`perf2bolt` 18.1.3. Three
+optimised arms, `afdoltob`, `pgolto` and `pgoltob`, were then measured against `base` on the whole
+machine, on three machine sizes.
+
+## Result: whole-box HammerDB TPROC-C, gcc 15.2.0 arms vs `base`
+
+**`pgoltob` (PGO + LTO + BOLT) is the best arm on all three machines: +10.3% to +12.0% NOPM**
+averaged over the six virtual-user counts.
+
+**Mean gain over the six VU counts**
+
+| machine | vCPU / NUMA nodes | warehouses | `afdoltob` | `pgolto` | `pgoltob` |
+|---|---|---|---|---|---|
+| r8i.metal-48xl\* | 192 / 3 | 1536 | +8.50% | +8.88% | **+11.95%** |
+| r8i.24xlarge | 96 / 2 | 768 | +7.05% | +6.12% | **+10.30%** |
+| r8i.16xlarge | 64 / 1 | 512 | +4.77% | +8.53% | **+10.54%** |
+
+**% gain vs `base` at each VU count**
+
+| VU | 48xl\* `afdoltob` / `pgolto` / `pgoltob` | 24xl `afdoltob` / `pgolto` / `pgoltob` | 16xl `afdoltob` / `pgolto` / `pgoltob` |
+|---|---|---|---|
+| 32 | +7.90 / +7.99 / +8.73 | +5.80 / +7.06 / +9.06 | +6.64 / +6.83 / +8.46 |
+| 64 | +6.36 / +2.62 / +7.97 | +15.22 / +11.75 / +18.06 | +10.20 / +9.18 / +7.93 |
+| 128 | +8.31 / +6.83 / +11.98 | +10.51 / +8.55 / +15.23 | +9.27 / +12.02 / +11.97 |
+| 256 | +15.21 / +19.15 / +25.11 | +4.83 / +3.61 / +9.04 | +2.01 / +9.22 / +25.40 |
+| 512 | +6.75 / +8.46 / +8.74 | +3.92 / +3.14 / +9.41 | +1.80 / +8.96 / +7.98 |
+| 1024 | +6.45 / +8.21 / +9.17 | +2.04 / +2.61 / +1.01 | −1.33 / +4.96 / +1.50 |
+
+**`base` NOPM** (mean of its two passes):
+
+| machine | 32 VU | 64 VU | 128 VU | 256 VU | 512 VU | 1024 VU |
+|---|---|---|---|---|---|---|
+| 48xl | 1,408,256 | 2,040,296 | 1,950,717 | 2,001,653 | 2,388,763 | 2,364,134 |
+| 24xl | 1,147,652 | 1,703,286 | 2,149,008 | 2,449,485 | 2,295,253 | 2,242,298 |
+| 16xl | 1,312,221 | 2,150,427 | 2,171,301 | 2,028,780 | 1,816,452 | 1,754,698 |
+
+The number of warehouses grows with the machine, so absolute NOPM should not be compared across
+machines. Only the within-machine ratio is meaningful.
+
+**Method**
+- HammerDB 4.7 TPROC-C with a 2 min rampup and 5 min measured run at each VU count.
+- PostgreSQL runs unpinned on all vCPUs.
+- The datadir is on tmpfs and is restored from a golden copy before each pass.
+- `shared_buffers` sits on 1 GiB huge pages.
+- The configuration is the published one for each machine size (see the table in the sysbench section).
+- Each machine ran eight passes in mirrored order: `base afdoltob pgolto pgoltob pgoltob pgolto afdoltob base`. Each arm is therefore measured twice, and every arm has the same average position in time.
+- Every figure is the mean of an arm's two passes.
+
+**How to read it**
+- \* **48xl: compared against the base pass with the same memory placement.** On that machine the
+  tmpfs restore placed the datadir mostly on node 1 in passes 1, 2, 4 and 5, and mostly on node 2 in
+  passes 3, 6, 7 and 8. That alone moves the same binary by about 13.5% (`base` pass 1 vs pass 8).
+  Each arm is therefore compared with the `base` pass that has the same placement:
+  - `pgoltob` is compared with pass 1.
+  - `pgolto` is compared with pass 8.
+  - `afdoltob` is compared with each of passes 1 and 8 separately, and the two gains are averaged.
+
+  The plain mirrored means (+8.49% / +1.96% / +19.06%) are distorted by placement and should not be
+  quoted. On the 24xl the tmpfs is mounted with `mpol=interleave`, so the datadir is spread evenly over
+  both nodes. Its two `base` passes agree within 1–3% at every VU count.
+- **256 VU on the 48xl** is a dip in `base` rather than a jump in the optimised arms, so every arm's
+  gain there is inflated.
+- **256 VU for `pgoltob` on the 16xl** comes from one high pass: 2.76M NOPM against 2.33M for its
+  other pass. On the 16xl, the 512 and 1024 VU points vary by 8–22% between passes for every arm, as
+  they did in the earlier five-machine sweep.
+- **Quote `pgoltob` as about +10% to +12% on the whole machine.** It is the best arm, or within
+  noise of the best, at every VU count up to 512 on all three machines.
+
+**Binaries (`bin/postgres` md5, first 12 hex digits):** `base` f8459d95d7de, `afdoltob` 887bb3886808,
+`pgolto` 5639be5bce8f, `pgoltob` 2b4d8844dc0c. The same files ran on all three machines; they were
+copied, not rebuilt.
+
+## Build and test machines
 
 This rebuilds the whole six-arm matrix with gcc 15.2.0 on one r8i.metal-48xl (Xeon 6975P-C, 192 vCPU,
 3 NUMA nodes), with a separate r8i.16xlarge HammerDB client in the same availability zone. The recipe
