@@ -730,3 +730,11 @@ llvm-bolt ./postgres -o postgres.bolt -data=<arm>.fdata \
 One asymmetry is kept from the recipe above: `afdoltoq` disables hot/cold splitting
 (`-fno-reorder-blocks-and-partition`) but `pgoltoq` does not, so the results stay comparable with the
 earlier campaign.
+
+---
+
+## Cross-architecture comparison
+
+[`COMPARISON.md`](COMPARISON.md) sets this leg against the other two PostgreSQL legs of this
+campaign (Intel / AMD / Graviton) on identical PostgreSQL 18.3 + gcc 15.2.0 builds and the same
+1,536 warehouse HammerDB TPROC-C workload. The same file is in all three repositories.
